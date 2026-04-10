@@ -2,4 +2,12 @@
 name = "cuda-genepool"
 version = "0.1.0"
 edition = "2021"
-description = "Gene pool — shared pattern library for agent evolution and code sharing"
+description = "Mitochondrial instinct engine — genes, enzymes, RNA, proteins, membrane"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Lucineer/cuda-genepool"
+readme = "README.md"
+keywords = ["ai", "fleet", "agent", "rust"]
+categories = ["science"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
