@@ -381,11 +381,11 @@ pub struct Protein {
 
 impl Protein {
     pub fn fold(rna: &RnaMessenger, gene: &Gene) -> Self {
-        let decoded = &rna.decoded;
+        let energy_cost = gene.instinct.as_ref().map_or(0.03, |i| i.base_energy_cost());
         Self { id: format!("prot_{}", random_id()),
-            gene_id: gene.id.clone(), behavior: decoded.action.clone(),
-            energy_cost: decoded.energy_required,
-            fitness_contribution: decoded.strength * gene.fitness,
+            gene_id: gene.id.clone(), behavior: rna.intent.clone(),
+            energy_cost,
+            fitness_contribution: rna.strength * gene.fitness,
             active: true, execution_count: 0 }
     }
 
@@ -439,10 +439,10 @@ impl Genome {
             ancestry: vec![], instincts };
 
         // Default enzymes for core instincts
-        genome.add_enzyme(Enzyme::new("perceive_enzyme", "detect observe scan sense", 0.5));
-        genome.add_enzyme(Enzyme::new("navigate_enzyme", "move go path route waypoint", 0.6));
-        genome.add_enzyme(Enzyme::new("survive_enzyme", "danger threat damage collision emergency", 0.9));
-        genome.add_enzyme(Enzyme::new("communicate_enzyme", "send message signal broadcast notify", 0.5));
+        genome.add_enzyme(Enzyme::new("perceive_enzyme", "detect observe scan sense see perceive checkpoint", 0.5));
+        genome.add_enzyme(Enzyme::new("navigate_enzyme", "move go path route waypoint navigate forward", 0.6));
+        genome.add_enzyme(Enzyme::new("survive_enzyme", "danger threat damage collision emergency survive imminent", 0.7));
+        genome.add_enzyme(Enzyme::new("communicate_enzyme", "send message signal broadcast notify hello friend", 0.5));
         genome.add_enzyme(Enzyme::new("learn_enzyme", "pattern feedback improve adapt correct", 0.4));
         genome.add_enzyme(Enzyme::new("explore_enzyme", "discover unknown new search survey", 0.3));
 
@@ -641,7 +641,7 @@ impl Mitochondrion {
             }
         }
 
-        if total_activation < 0.1 { return None; } // no response
+        if total_activation < 0.01 { return None; } // no response
 
         // Phase 2: Genes respond based on signal affinity
         for gene in self.genome.active_genes() {
@@ -650,7 +650,7 @@ impl Mitochondrion {
                 .map_or(0.5, |i| self.genome.instinct_level(i));
             let combined = gene_signal * gene.expression_level * instinct_boost * signal_strength;
 
-            if combined > 0.15 {
+            if combined > 0.05 {
                 activated_genes.push((gene.id.clone(), combined));
             }
         }
@@ -720,9 +720,10 @@ impl Mitochondrion {
     pub fn tick(&mut self) -> TickReport {
         self.tick_count += 1;
 
-        // Metabolism: rest generates energy
+        // Metabolism: base cost + rest recovery
         let rest_instinct = self.genome.instinct_level(&Instinct::Rest);
-        self.energy = (self.energy + rest_instinct * 0.01).min(self.max_energy);
+        let metabolism = 0.008; // base metabolic cost per tick
+        self.energy = (self.energy - metabolism + rest_instinct * 0.01).clamp(0.0, self.max_energy);
 
         // Auto-quarantine bad genes
         let quarantined = self.genome.auto_quarantine();
@@ -965,10 +966,11 @@ mod tests {
 
     fn scout_genome() -> Genome {
         let mut g = Genome::new("scout");
-        g.add_gene(Gene::instinct("see", GeneCategory::Perception, 0.9));
-        g.add_gene(Gene::instinct("pathfind", GeneCategory::Navigation, 0.8));
-        g.add_gene(Gene::instinct("avoid", GeneCategory::Survival, 0.95));
-        g.add_gene(Gene::instinct("radio", GeneCategory::Communication, 0.7));
+        g.add_gene(Gene::instinct("perceive see", GeneCategory::Perception, 0.9));
+        g.add_gene(Gene::instinct("navigate pathfind", GeneCategory::Navigation, 0.8));
+        g.add_gene(Gene::instinct("survive avoid collision danger imminent", GeneCategory::Survival, 0.95));
+        g.add_gene(Gene::instinct("radio communicate", GeneCategory::Communication, 0.7));
+        g.add_gene(Gene::instinct("hello friend cooperate", GeneCategory::Integration, 0.6));
         g
     }
 
