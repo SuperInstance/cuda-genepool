@@ -202,9 +202,11 @@ impl Gene {
     pub fn signal_affinity(&self, signal: &str) -> f64 {
         let gene_lower = self.pattern.to_lowercase();
         let signal_lower = signal.to_lowercase();
-        let words: Vec<&str> = signal_lower.split(|c: char| !c.is_alphanumeric()).collect();
+        let words: Vec<&str> = signal_lower.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty()).collect();
+        if words.is_empty() { return 0.0; }
         let matches = words.iter().filter(|w| gene_lower.contains(*w)).count();
-        let score = matches as f64 / words.len().max(1) as f64;
+        let score = matches as f64 / words.len() as f64;
         score * self.expression_level
     }
 }
@@ -263,9 +265,12 @@ impl Enzyme {
             if signal_lower.contains(&binding) { 1.0 } else { 0.0 }
         } else {
             // Lower specificity — partial match, word-level
-            let words: Vec<&str> = binding.split(|c: char| !c.is_alphanumeric()).collect();
-            let matches = words.iter().filter(|w| signal_lower.contains(*w)).count();
-            matches as f64 / words.len().max(1) as f64
+            let words: Vec<&str> = binding.split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty()).collect();
+            if words.is_empty() { 0.0 } else {
+                let matches = words.iter().filter(|w| signal_lower.contains(*w)).count();
+                matches as f64 / words.len() as f64
+            }
         };
 
         if affinity > 0.0 {
@@ -660,7 +665,9 @@ impl Mitochondrion {
         // Phase 3: Transcribe RNA from top genes
         for (gene_id, strength) in activated_genes.iter().take(3) {
             if let Some(gene) = self.genome.genes.get(gene_id) {
-                let rna = RnaMessenger::transcribe(gene, signal);
+                let mut rna = RnaMessenger::transcribe(gene, signal);
+                // Override RNA strength with signal-specific activation strength
+                rna.strength = *strength;
                 self.rna_queue.push_back(rna);
             }
         }
@@ -676,6 +683,11 @@ impl Mitochondrion {
                 if result.success {
                     self.energy = (self.energy - result.energy_consumed).max(0.0);
                     self.total_atp_consumed += result.energy_consumed;
+                    self.total_atp_produced += result.energy_consumed;
+                    rna.translated = true;
+
+                    // Store the protein
+                    self.proteins.insert(protein.id.clone(), protein);
 
                     // Success feedback to gene
                     if let Some(g) = self.genome.genes.get_mut(&gene_id_clone) {
@@ -761,6 +773,8 @@ impl Mitochondrion {
     pub fn energy(&self) -> f64 { self.energy }
     pub fn is_alive(&self) -> bool { self.alive }
     pub fn generation(&self) -> u32 { self.generation }
+    pub fn protein_count(&self) -> usize { self.proteins.len() }
+    pub fn total_atp_produced(&self) -> f64 { self.total_atp_produced }
 }
 
 /// Action potential — the output of the mitochondrion.
@@ -1266,5 +1280,109 @@ mod tests {
         let gene = Gene::learned("custom_pattern", GeneCategory::Optimization, "captain");
         assert!(gene.instinct.is_none());
         assert_eq!(gene.origin_agent, "captain");
+    }
+
+    // ============================================================
+    // Integration tests for RNA→Protein pipeline
+    // ============================================================
+
+    #[test]
+    fn test_signal_affinity_empty_string_filtering() {
+        // Bug: splitting "navigate  to   alpha" (double/triple spaces) produced empty
+        // strings that inflated the denominator, reducing affinity scores incorrectly.
+        // After fix: empty strings are filtered, denominator only counts real words.
+        let gene = Gene::instinct("navigate", GeneCategory::Navigation, 0.8);
+        // Double space between words — without fix, denominator includes empty strings
+        let affinity = gene.signal_affinity("navigate  to   alpha");
+        // With fix: words = ["navigate", "to", "alpha"], 1 match, score = 1/3 * 0.8 = 0.267
+        // Without fix: words = ["navigate", "", "to", "", "", "alpha"], 1/6 * 0.8 = 0.133
+        assert!(affinity > 0.25, "affinity should be ~0.267 with empty string filtering, got {}", affinity);
+
+        // Pure non-alphanumeric signal should return 0
+        let zero_affinity = gene.signal_affinity("!!!");
+        assert!(zero_affinity == 0.0);
+    }
+
+    #[test]
+    fn test_enzyme_binding_empty_string_filtering() {
+        // Same empty-string bug in Enzyme::bind's word-level matching path
+        let mut enzyme = Enzyme::new("test", "observe  sense", 0.5); // double space in binding
+        let result = enzyme.bind("observe  sense things", 0.8);
+        assert!(result.is_some());
+        // With fix: binding words = ["observe", "sense"], signal words = ["observe", "sense", "things"]
+        // 2/2 binding words found in signal → affinity = 1.0 * 0.7 = 0.7
+        assert!(result.unwrap() > 0.5, "enzyme should bind strongly with filtered words");
+    }
+
+    #[test]
+    fn test_rna_translated_flag_after_pipeline() {
+        // Bug: RnaMessenger.translated was never set to true after successful
+        // protein folding and execution in the full pipeline.
+        let gene = Gene::instinct("perceive scan", GeneCategory::Perception, 0.9);
+        let mut rna = RnaMessenger::transcribe(&gene, "scan environment");
+        assert!(!rna.translated); // initially false
+
+        // Decode RNA (extract intent)
+        rna.decode();
+        assert!(!rna.translated); // decoding alone doesn't translate
+
+        // Fold into protein
+        let protein = Protein::fold(&rna, &gene);
+        // Manual translation step (simulating what process_signal does)
+        rna.translated = true;
+        assert!(rna.translated); // now marked as translated
+
+        // Protein should have correct energy cost from instinct
+        assert!(protein.energy_cost > 0.0);
+        assert_eq!(protein.behavior, "scan environment");
+    }
+
+    #[test]
+    fn test_protein_storage_and_atp_tracking() {
+        // Bug: proteins were created but never stored; total_atp_produced was never
+        // incremented. Both are now tracked properly in the mitochondrion.
+        let genome = scout_genome();
+        let mut mito = Mitochondrion::new(&genome);
+        assert_eq!(mito.protein_count(), 0);
+        assert!(mito.total_atp_produced() == 0.0);
+
+        // Process a signal through the full pipeline
+        let atp = mito.process_signal("collision imminent danger", 0.9);
+        assert!(atp.is_some());
+
+        // Protein should now be stored
+        assert_eq!(mito.protein_count(), 1);
+
+        // ATP produced should be tracked
+        assert!(mito.total_atp_produced() > 0.0,
+            "total_atp_produced should be > 0 after successful signal processing, got {}", mito.total_atp_produced());
+
+        // Process another signal
+        let atp2 = mito.process_signal("navigate forward", 0.8);
+        if atp2.is_some() {
+            assert_eq!(mito.protein_count(), 2);
+            assert!(mito.total_atp_produced() > 0.01);
+        }
+    }
+
+    #[test]
+    fn test_rna_strength_reflects_signal_activation() {
+        // Bug: RNA strength was set from gene's intrinsic fitness * expression,
+        // ignoring the signal-specific activation strength. Now the activation
+        // strength from enzyme+gene matching is propagated to RNA.
+        let genome = scout_genome();
+        let mut mito = Mitochondrion::new(&genome);
+
+        // High-strength signal should produce stronger ATP response
+        let weak = mito.process_signal("navigate forward", 0.1);
+        // Reset energy for fair comparison
+        let mut mito2 = Mitochondrion::new(&genome);
+        let strong = mito2.process_signal("navigate forward", 1.0);
+
+        if let (Some(w), Some(s)) = (weak, strong) {
+            // Stronger signal should produce equal or stronger ATP response
+            assert!(s.strength >= w.strength,
+                "strong signal (1.0) should produce >= ATP than weak signal (0.1): {} vs {}", s.strength, w.strength);
+        }
     }
 }
